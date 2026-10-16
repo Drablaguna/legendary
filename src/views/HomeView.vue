@@ -15,6 +15,24 @@ import {
 import { tierStyleString } from "../utils/helpers";
 import CardItem from "../components/CardItem.vue";
 import { dnd } from "../composables/useCardDrag";
+import { useSyncEngine } from "../composables/useSyncEngine";
+
+const { syncState, syncNow } = useSyncEngine();
+
+const syncTooltip = computed(() => {
+  if (syncState.status === "syncing") {
+    return syncState.pendingCount > 0
+      ? `Syncing (${syncState.pendingCount} pending)...`
+      : "Syncing with Neon...";
+  }
+  if (syncState.status === "offline") {
+    return "Offline (changes saved locally)";
+  }
+  if (syncState.status === "error") {
+    return `Sync error: ${syncState.errorMessage || "Tap to retry"}`;
+  }
+  return "Cloud Sync: Synced with Neon (Tap to sync now)";
+});
 
 const searchInputRef = ref(null);
 const cardsElRef = ref(null);
@@ -171,7 +189,18 @@ function onTouchEnd(e) {
             ›
           </button>
         </div>
-        <span></span>
+        <button
+          class="icon-btn sync-btn"
+          :class="['sync-' + syncState.status]"
+          :title="syncTooltip"
+          :aria-label="syncTooltip"
+          @click="syncNow"
+        >
+          <span v-if="syncState.status === 'syncing'" class="sync-icon spin" aria-hidden="true">↻</span>
+          <span v-else-if="syncState.status === 'offline'" class="sync-icon offline" aria-hidden="true">◌</span>
+          <span v-else-if="syncState.status === 'error'" class="sync-icon error" aria-hidden="true">!</span>
+          <span v-else class="sync-icon synced" aria-hidden="true">●</span>
+        </button>
       </div>
 
       <!-- Search Input -->

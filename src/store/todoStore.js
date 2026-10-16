@@ -23,29 +23,8 @@ import {
   toLocalInput,
   pad2,
 } from "../utils/helpers";
-
-function readJSON(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw == null) return fallback;
-    try {
-      return JSON.parse(raw);
-    } catch (e) {
-      try {
-        localStorage.setItem(key + ":corrupt-backup", raw);
-      } catch (e2) {}
-      return fallback;
-    }
-  } catch (e) {
-    return fallback;
-  }
-}
-
-function writeJSON(key, value) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch (e) {}
-}
+import { readJSON, writeJSON, enqueueMutation } from "../services/storage";
+import { scheduleSync, registerReconciler, syncNow } from "../composables/useSyncEngine";
 
 export const store = reactive({
   items: [],
@@ -59,6 +38,7 @@ export const store = reactive({
   settings: {
     theme: "dark",
     xp: Object.assign({}, DEFAULT_XP),
+    updatedAt: 0,
   },
   now: Date.now(), // live timestamp updated every second
 
@@ -192,7 +172,7 @@ export function normalizeTrash(raw) {
 }
 
 export function normalizeSettings(raw) {
-  const s = { theme: "dark", xp: Object.assign({}, DEFAULT_XP) };
+  const s = { theme: "dark", xp: Object.assign({}, DEFAULT_XP), updatedAt: 0 };
   if (raw && (raw.theme === "light" || raw.theme === "dark")) s.theme = raw.theme;
   if (raw && raw.xp) {
     for (let t = 1; t <= 5; t++) {
@@ -200,6 +180,7 @@ export function normalizeSettings(raw) {
       if (Number.isFinite(v) && v >= 0) s.xp[t] = Math.min(99999, Math.round(v));
     }
   }
+  if (raw && typeof raw.updatedAt === "number") s.updatedAt = raw.updatedAt;
   return s;
 }
 
@@ -222,6 +203,9 @@ export function loadStore() {
   if (ui && ["list", "calendar", "timeline"].includes(ui.ovView)) store.ovView = ui.ovView;
 
   applyTheme();
+
+  // Schedule an initial background sync to fetch any remote changes
+  scheduleSync(500);
 }
 
 export function save() {
@@ -229,7 +213,18 @@ export function save() {
 }
 
 export function saveSettings() {
+  if (!store.settings.updatedAt) {
+    store.settings.updatedAt = Date.now();
+  }
   writeJSON(SETTINGS_KEY, store.settings);
+  enqueueMutation({
+    table: "settings",
+    action: "UPSERT",
+    entityId: "app_settings",
+    data: store.settings,
+    timestamp: store.settings.updatedAt,
+  });
+  scheduleSync();
 }
 
 export function saveTimer() {
@@ -263,6 +258,7 @@ export function applyTheme() {
 
 export function setTheme(theme) {
   store.settings.theme = theme;
+  store.settings.updatedAt = Date.now();
   saveSettings();
   applyTheme();
 }
@@ -270,6 +266,109 @@ export function setTheme(theme) {
 export function toggleTheme() {
   setTheme(store.settings.theme === "light" ? "dark" : "light");
 }
+
+/* ============ SERVER RECONCILIATION ============ */
+export function reconcileServerChanges(changes) {
+  if (!changes) return;
+
+  let hasItemChanges = false;
+  let hasTrashChanges = false;
+  let hasSettingsChanges = false;
+
+  // 1. Remote item deletions (tombstones)
+  if (Array.isArray(changes.deletedItemIds) && changes.deletedItemIds.length) {
+    const delSet = new Set(changes.deletedItemIds);
+    const prevLen = store.items.length;
+    store.items = store.items.filter((i) => !delSet.has(i.id));
+    if (store.items.length !== prevLen) {
+      delSet.forEach((id) => store.collapsed.delete(id));
+      if (store.timer && delSet.has(store.timer.id)) {
+        store.timer = null;
+        saveTimer();
+      }
+      hasItemChanges = true;
+    }
+  }
+
+  // 2. Remote item upserts (LWW)
+  if (Array.isArray(changes.items) && changes.items.length) {
+    for (const serverItem of changes.items) {
+      if (!isValidItem(serverItem)) continue;
+      const local = byId(serverItem.id);
+      if (local) {
+        if ((serverItem.updatedAt || 0) >= (local.updatedAt || 0)) {
+          Object.assign(local, serverItem);
+          hasItemChanges = true;
+        }
+      } else {
+        const inTrash = store.trash.some((e) =>
+          e.items.some((ti) => ti.id === serverItem.id)
+        );
+        if (!inTrash) {
+          store.items.push(serverItem);
+          hasItemChanges = true;
+        }
+      }
+    }
+    if (hasItemChanges) {
+      normalizeItems(store.items);
+    }
+  }
+
+  // 3. Remote trash deletions
+  if (Array.isArray(changes.deletedTrashIds) && changes.deletedTrashIds.length) {
+    const delTrashSet = new Set(changes.deletedTrashIds);
+    const prevTrashLen = store.trash.length;
+    store.trash = store.trash.filter((t) => !delTrashSet.has(t.id));
+    if (store.trash.length !== prevTrashLen) {
+      hasTrashChanges = true;
+    }
+  }
+
+  // 4. Remote trash upserts
+  if (Array.isArray(changes.trash) && changes.trash.length) {
+    for (const serverEntry of changes.trash) {
+      const localEntry = store.trash.find((t) => t.id === serverEntry.id);
+      if (localEntry) {
+        const sTime = serverEntry.updatedAt || serverEntry.deletedAt || 0;
+        const lTime = localEntry.updatedAt || localEntry.deletedAt || 0;
+        if (sTime >= lTime) {
+          Object.assign(localEntry, serverEntry);
+          hasTrashChanges = true;
+        }
+      } else {
+        store.trash.unshift(serverEntry);
+        hasTrashChanges = true;
+      }
+    }
+    if (hasTrashChanges) {
+      store.trash = normalizeTrash(store.trash);
+    }
+  }
+
+  // 5. Remote settings
+  if (changes.settings) {
+    const s = changes.settings;
+    const sTime = s.updatedAt || 0;
+    const lTime = store.settings.updatedAt || 0;
+    if (sTime >= lTime) {
+      if (s.theme === "light" || s.theme === "dark") store.settings.theme = s.theme;
+      if (s.xp) store.settings.xp = Object.assign({}, DEFAULT_XP, s.xp);
+      store.settings.updatedAt = sTime || Date.now();
+      hasSettingsChanges = true;
+      applyTheme();
+    }
+  }
+
+  if (hasItemChanges) save();
+  if (hasTrashChanges) saveTrash();
+  if (hasSettingsChanges) {
+    writeJSON(SETTINGS_KEY, store.settings);
+  }
+}
+
+// Register reconciler with sync engine
+registerReconciler(reconcileServerChanges);
 
 /* ============ QUERIES ============ */
 export const byId = (id) => store.items.find((i) => i.id === id) || null;
@@ -354,6 +453,14 @@ export function stopTimer() {
     item.sessions = (item.sessions || []).concat({ startedAt: t.startedAt, seconds: secs }).slice(-200);
     item.updatedAt = Date.now();
     save();
+    enqueueMutation({
+      table: "items",
+      action: "UPSERT",
+      entityId: item.id,
+      data: item,
+      timestamp: item.updatedAt,
+    });
+    scheduleSync();
   }
   return item ? secs : 0;
 }
@@ -417,6 +524,16 @@ export function createItem({ title, tier, parentId = null, notes = "", dueAt = n
 
   store.items.push(item);
   save();
+
+  enqueueMutation({
+    table: "items",
+    action: "UPSERT",
+    entityId: item.id,
+    data: item,
+    timestamp: item.updatedAt,
+  });
+  scheduleSync();
+
   return { item };
 }
 
@@ -436,6 +553,16 @@ export function updateItem(id, patch) {
     delete item.target;
   }
   save();
+
+  enqueueMutation({
+    table: "items",
+    action: "UPSERT",
+    entityId: item.id,
+    data: item,
+    timestamp: item.updatedAt,
+  });
+  scheduleSync();
+
   return { item };
 }
 
@@ -462,14 +589,31 @@ export function trashItems(ids) {
     const entry = { id: newId(), rootId: root.id, deletedAt: now, items };
     store.trash.unshift(entry);
     entryIds.push(entry.id);
+
+    enqueueMutation({
+      table: "trash",
+      action: "UPSERT",
+      entityId: entry.id,
+      data: entry,
+      timestamp: entry.deletedAt,
+    });
   });
 
   if (store.timer && gone.has(store.timer.id)) stopTimer();
   store.items = store.items.filter((i) => !gone.has(i.id));
-  gone.forEach((g) => store.collapsed.delete(g));
+  gone.forEach((g) => {
+    store.collapsed.delete(g);
+    enqueueMutation({
+      table: "items",
+      action: "DELETE",
+      entityId: g,
+      timestamp: now,
+    });
+  });
 
   save();
   saveTrash();
+  scheduleSync();
 
   if (roots.length) {
     showUndo(
@@ -484,6 +628,7 @@ export function restoreEntries(entryIds) {
   let count = 0;
   let topLevel = 0;
   let first = null;
+  const now = Date.now();
 
   entryIds.forEach((eid) => {
     const k = store.trash.findIndex((e) => e.id === eid);
@@ -496,14 +641,34 @@ export function restoreEntries(entryIds) {
       topLevel++;
     }
     entry.items.forEach((i) => {
-      if (!byId(i.id)) store.items.push(i);
+      if (!byId(i.id)) {
+        i.updatedAt = now;
+        store.items.push(i);
+        enqueueMutation({
+          table: "items",
+          action: "UPSERT",
+          entityId: i.id,
+          data: i,
+          timestamp: i.updatedAt,
+        });
+      }
     });
+
+    enqueueMutation({
+      table: "trash",
+      action: "DELETE",
+      entityId: eid,
+      timestamp: now,
+    });
+
     count++;
     first = first || root;
   });
 
   save();
   saveTrash();
+  scheduleSync();
+
   if (count) {
     showToast(
       (count === 1 ? `Restored "${first.title}"` : `Restored ${count} items`) +
@@ -525,6 +690,16 @@ export function moveItem(id, parentId) {
   item.parentId = parentId;
   item.updatedAt = Date.now();
   save();
+
+  enqueueMutation({
+    table: "items",
+    action: "UPSERT",
+    entityId: item.id,
+    data: item,
+    timestamp: item.updatedAt,
+  });
+  scheduleSync();
+
   return { item };
 }
 
@@ -535,6 +710,7 @@ export function toggleDone(id) {
   const now = Date.now();
   item.updatedAt = now;
   const completed = [];
+  const updatedItems = [item];
 
   if (item.done) {
     item.completedAt = now;
@@ -545,6 +721,7 @@ export function toggleDone(id) {
         d.updatedAt = now;
         d.completedAt = now;
         completed.push(d.id);
+        updatedItems.push(d);
       }
     });
   } else {
@@ -554,6 +731,17 @@ export function toggleDone(id) {
   if (store.timer && completed.includes(store.timer.id)) stopTimer();
   save();
 
+  updatedItems.forEach((i) => {
+    enqueueMutation({
+      table: "items",
+      action: "UPSERT",
+      entityId: i.id,
+      data: i,
+      timestamp: i.updatedAt,
+    });
+  });
+  scheduleSync();
+
   if (item.done) xpToast(completed);
   if (item.done && item.tier === 1) {
     showUndo(`Completed "${item.title}"`, () => uncomplete(completed));
@@ -562,21 +750,35 @@ export function toggleDone(id) {
 
 export function uncomplete(ids) {
   const now = Date.now();
+  const updatedItems = [];
   ids.forEach((id) => {
     const i = byId(id);
     if (i) {
       i.done = false;
       i.updatedAt = now;
       delete i.completedAt;
+      updatedItems.push(i);
     }
   });
   save();
+
+  updatedItems.forEach((i) => {
+    enqueueMutation({
+      table: "items",
+      action: "UPSERT",
+      entityId: i.id,
+      data: i,
+      timestamp: i.updatedAt,
+    });
+  });
+  scheduleSync();
 }
 
 export function completeMany(ids) {
   const now = Date.now();
   const completed = [];
   const legends = [];
+  const updatedItems = [];
 
   ids.forEach((id) => {
     const item = byId(id);
@@ -587,12 +789,25 @@ export function completeMany(ids) {
       i.updatedAt = now;
       i.completedAt = now;
       completed.push(i.id);
+      updatedItems.push(i);
       if (i.id === id && i.tier === 1) legends.push(i);
     });
   });
 
   if (store.timer && completed.includes(store.timer.id)) stopTimer();
   save();
+
+  updatedItems.forEach((i) => {
+    enqueueMutation({
+      table: "items",
+      action: "UPSERT",
+      entityId: i.id,
+      data: i,
+      timestamp: i.updatedAt,
+    });
+  });
+  scheduleSync();
+
   return { completed, legends };
 }
 
@@ -602,14 +817,31 @@ export function restoreHistory(id) {
 
 export function emptyTrash() {
   if (!store.trash.length) return;
+  const now = Date.now();
+  store.trash.forEach((e) => {
+    enqueueMutation({
+      table: "trash",
+      action: "DELETE",
+      entityId: e.id,
+      timestamp: now,
+    });
+  });
   store.trash = [];
   saveTrash();
+  scheduleSync();
   showToast("Trash emptied.");
 }
 
 export function purgeTrash(id) {
   store.trash = store.trash.filter((x) => x.id !== id);
   saveTrash();
+  enqueueMutation({
+    table: "trash",
+    action: "DELETE",
+    entityId: id,
+    timestamp: Date.now(),
+  });
+  scheduleSync();
   showToast("Deleted forever.");
 }
 
@@ -695,6 +927,29 @@ export async function importFile(file) {
   save();
   saveTrash();
   saveUI();
+
+  // Enqueue all items and trash for cloud sync
+  const now = Date.now();
+  store.items.forEach((i) => {
+    enqueueMutation({
+      table: "items",
+      action: "UPSERT",
+      entityId: i.id,
+      data: i,
+      timestamp: i.updatedAt || now,
+    });
+  });
+  store.trash.forEach((t) => {
+    enqueueMutation({
+      table: "trash",
+      action: "UPSERT",
+      entityId: t.id,
+      data: t,
+      timestamp: t.deletedAt || now,
+    });
+  });
+  scheduleSync();
+
   showToast(`Imported ${store.items.length} item${store.items.length === 1 ? "" : "s"}.`);
 }
 

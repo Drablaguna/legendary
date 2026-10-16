@@ -11,6 +11,24 @@ import {
   tierStyleString,
   levelInfo,
 } from "../utils/helpers";
+import { useSyncEngine } from "../composables/useSyncEngine";
+
+const { syncState, syncNow } = useSyncEngine();
+
+function formatSyncTime(ts) {
+  if (!ts) return "Never";
+  const diffSec = Math.floor((Date.now() - ts) / 1000);
+  if (diffSec < 10) return "Just now";
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  return new Date(ts).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    month: "short",
+    day: "numeric",
+  });
+}
 
 const total = computed(() => totalXp());
 const lv = computed(() => levelInfo(total.value));
@@ -109,6 +127,56 @@ const shortcutGroups = [
       >
         ☀️ Light
       </button>
+    </div>
+
+    <!-- Cloud Sync & Storage -->
+    <h2>Cloud Sync & Storage</h2>
+    <div class="sync-card">
+      <div class="sync-card-header">
+        <span class="sync-card-title">Neon Postgres Cloud Sync</span>
+        <span class="sync-status-badge" :class="['status-' + syncState.status]">
+          <i class="status-dot"></i>
+          {{
+            syncState.status === 'synced'
+              ? 'Synced'
+              : syncState.status === 'syncing'
+              ? 'Syncing...'
+              : syncState.status === 'offline'
+              ? 'Offline'
+              : 'Error'
+          }}
+        </span>
+      </div>
+
+      <div class="sync-card-body">
+        <div class="sync-meta-row">
+          <span class="sync-meta-label">Pending Local Changes</span>
+          <span class="sync-meta-val">{{ syncState.pendingCount }} item(s)</span>
+        </div>
+        <div class="sync-meta-row">
+          <span class="sync-meta-label">Last Synced</span>
+          <span class="sync-meta-val">{{ formatSyncTime(syncState.lastSyncedAt) }}</span>
+        </div>
+        <div class="sync-meta-row">
+          <span class="sync-meta-label">Storage Backend</span>
+          <span class="sync-meta-val">Neon Serverless (Cloudflare Pages)</span>
+        </div>
+      </div>
+
+      <div v-if="syncState.errorMessage" class="sync-error-banner">
+        ⚠️ {{ syncState.errorMessage }}
+      </div>
+
+      <div class="sync-actions">
+        <button
+          class="bk-btn primary"
+          :disabled="syncState.status === 'syncing'"
+          @click="syncNow"
+        >
+          <span v-if="syncState.status === 'syncing'" class="spin-inline">↻</span>
+          {{ syncState.status === 'syncing' ? 'Syncing...' : 'Sync Now' }}
+        </button>
+      </div>
     </div>
 
     <!-- XP Configuration -->

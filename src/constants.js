@@ -15,6 +15,8 @@ export const UI_KEY = "ltd:v1:ui";
 export const TRASH_KEY = "ltd:v1:trash";
 export const TIMER_KEY = "ltd:v1:timer";
 export const SETTINGS_KEY = "ltd:v1:settings";
+export const OUTBOX_KEY = "ltd:v1:outbox";
+export const SYNC_META_KEY = "ltd:v1:sync_meta";
 
 export const TRASH_DAYS = 30;
 export const DEFAULT_XP = { 1: 100, 2: 50, 3: 25, 4: 10, 5: 5 };
