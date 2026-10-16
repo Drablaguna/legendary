@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#14141A">
+  <title>Legendary To-Do</title>
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    /* Apply the saved theme before first paint so a light theme doesn't flash dark. */
+    try {
+      var s = JSON.parse(localStorage.getItem("ltd:v1:settings"));
+      if (s && s.theme === "light") document.documentElement.dataset.theme = "light";
+    } catch (e) {}
+  </script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+
+  <!-- HOME -->
+  <main id="home" class="screen home" aria-label="All items">
+    <header class="home-top">
+      <div class="domain-bar">
+        <button class="icon-btn menu-btn" data-action="menu" aria-label="Open menu" aria-expanded="false" aria-controls="drawer">☰</button>
+        <div class="domain-nav">
+          <button class="icon-btn" data-action="domain-prev" aria-label="Previous domain">‹</button>
+          <div class="domain-center" aria-live="polite">
+            <h1 id="domain-title">Client</h1>
+            <div id="domain-dots" class="dots" aria-hidden="true"></div>
+          </div>
+          <button class="icon-btn" data-action="domain-next" aria-label="Next domain">›</button>
+        </div>
+        <span></span>
+      </div>
+      <input id="search" type="search" placeholder="Search titles and notes…" aria-label="Search items" autocomplete="off">
+      <div id="chips" class="chips" role="group" aria-label="Filter by type"></div>
+    </header>
+    <div id="cards" class="cards" tabindex="-1"></div>
+    <div id="select-bar" class="select-bar" role="toolbar" aria-label="Selection actions" hidden>
+      <button class="sel-x" data-action="select-cancel" aria-label="Cancel selection">✕</button>
+      <span id="select-count" class="sel-count" aria-live="polite">0 selected</span>
+      <button id="select-all" class="sel-btn" data-action="select-all">All</button>
+      <button class="sel-btn good" data-action="select-complete" data-needs-selection disabled>✓ Complete</button>
+      <button class="sel-btn bad" data-action="select-delete" data-needs-selection disabled>🗑 Delete</button>
+    </div>
+    <div id="drop-top"class="drop-top" hidden>Drop here to move to the top level</div>
+    <button class="fab" data-action="add-top" aria-label="Create new item">+</button>
+  </main>
+
+  <!-- OTHER FEATURES (generic view for any menu entry that isn't the to-do tracker) -->
+  <section id="feature" class="screen feature" aria-label="Feature" hidden>
+    <div class="feature-bar">
+      <button class="icon-btn menu-btn" data-action="menu" aria-label="Open menu" aria-expanded="false" aria-controls="drawer">☰</button>
+      <h1 id="feature-title"></h1>
+    </div>
+    <div id="feature-body" class="feature-body"></div>
+  </section>
+
+  <!-- DETAIL -->
+  <section id="detail" class="screen detail" aria-label="Item detail" hidden>
+    <div class="detail-inner">
+      <div class="detail-bar">
+        <button class="icon-btn" data-action="back" aria-label="Back">←<span class="lbl">Back</span></button>
+        <span class="spacer"></span>
+        <button class="icon-btn" data-action="home" aria-label="Home">⌂</button>
+        <button class="icon-btn" data-action="edit" aria-label="Edit item">✎</button>
+        <button class="icon-btn" data-action="delete" aria-label="Delete item">🗑</button>
+      </div>
+      <div id="detail-body"></div>
+    </div>
+  </section>
+
+  <!-- SIDE MENU (entries come from FEATURES in app.js) -->
+  <div id="drawer-backdrop" class="drawer-backdrop" data-action="menu-close" hidden></div>
+  <aside id="drawer" class="drawer" aria-label="Main menu" aria-hidden="true" inert>
+    <div class="drawer-head">
+      <span class="drawer-brand">Legendary</span>
+      <button class="icon-btn" data-action="menu-close" aria-label="Close menu">✕</button>
+    </div>
+    <nav id="drawer-nav" class="drawer-nav"></nav>
+  </aside>
+
+  <!-- CREATE / EDIT SHEET -->
+  <dialog id="sheet" aria-labelledby="sheet-heading">
+    <form id="sheet-form" novalidate>
+      <h2 id="sheet-heading">New item</h2>
+
+      <label class="field">
+        <span>Title</span>
+        <input id="f-title" type="text" maxlength="200" autocomplete="off" required>
+      </label>
+      <p id="f-error" class="error" role="alert" hidden></p>
+
+      <fieldset class="field">
+        <legend>Type</legend>
+        <div id="tier-picker" class="tier-picker"></div>
+      </fieldset>
+
+      <fieldset class="field" id="dl-field">
+        <legend>Deadline <em>(optional)</em></legend>
+        <div id="dl-modes" class="dl-modes" role="group" aria-label="Deadline type">
+          <button type="button" data-action="dl-mode" data-mode="none">None</button>
+          <button type="button" data-action="dl-mode" data-mode="date">Date &amp; time</button>
+          <button type="button" data-action="dl-mode" data-mode="month">Target month</button>
+          <button type="button" data-action="dl-mode" data-mode="year">Target year</button>
+        </div>
+
+        <div id="dl-date" hidden>
+          <div class="due-presets">
+            <button type="button" class="preset" data-action="due-preset" data-kind="today">Today</button>
+            <button type="button" class="preset" data-action="due-preset" data-kind="tomorrow">Next day</button>
+            <button type="button" class="preset" data-action="due-preset" data-kind="week">Next week</button>
+            <button type="button" class="preset" data-action="due-preset" data-kind="month">Next month</button>
+            <button type="button" class="preset clear" data-action="due-preset" data-kind="clear">Clear</button>
+          </div>
+          <input id="f-due" type="datetime-local" aria-label="Due date and time">
+        </div>
+
+        <div id="dl-target" hidden>
+          <div class="due-presets">
+            <button type="button" class="preset tg-m" data-action="tg-preset" data-kind="thismonth">This month</button>
+            <button type="button" class="preset tg-m" data-action="tg-preset" data-kind="nextmonth">Next month</button>
+            <button type="button" class="preset tg-y" data-action="tg-preset" data-kind="thisyear">This year</button>
+            <button type="button" class="preset tg-y" data-action="tg-preset" data-kind="nextyear">Next year</button>
+          </div>
+          <div class="tg-row">
+            <select id="f-t-month" aria-label="Target month"></select>
+            <select id="f-t-year" aria-label="Target year"></select>
+          </div>
+        </div>
+      </fieldset>
+
+      <label class="field">
+        <span>Notes <em>(optional)</em></span>
+        <textarea id="f-notes" rows="3"></textarea>
+      </label>
+
+      <div class="sheet-actions">
+        <button type="button" class="btn ghost" data-action="sheet-cancel">Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- DELETE CONFIRM -->
+  <dialog id="confirm" aria-labelledby="confirm-heading">
+    <form method="dialog" class="confirm-form">
+      <h2 id="confirm-heading">Delete item?</h2>
+      <p id="confirm-text"></p>
+      <div class="sheet-actions">
+        <button value="cancel" class="btn ghost">Cancel</button>
+        <button value="delete" class="btn danger">Delete</button>
+      </div>
+    </form>
+  </dialog>
+
+  <button id="timer-pill" class="timer-pill" data-action="timer-open" aria-label="Open the item with the running focus timer" hidden>
+    <span class="tp-dot" aria-hidden="true"></span><span class="tp-title"></span><span class="tp-clock"></span>
+  </button>
+
+  <div id="undo-toast"class="undo-toast" role="status" aria-live="polite" hidden>
+    <span class="undo-msg"></span>
+    <button class="undo-btn" data-action="undo">Undo</button>
+    <button class="undo-x" data-action="undo-dismiss" aria-label="Dismiss">✕</button>
+  </div>
+
+  <div id="toast"class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
